@@ -1,34 +1,25 @@
 import { Repository, DataSource } from 'typeorm';
 import { AppDataSource } from '../config/database';
 import { NotaFiscal, StatusNotaFiscal } from '../entity/NotaFiscal';
-import axios from 'axios';
+import { DadosCriacaoNotaFiscalRequest } from '../types/NotaFiscalTypes';
+import { IApiEmissaoNotaFiscal } from '../interfaces/IApiEmissaoNotaFiscal';
+import { INotaFiscalService } from '../interfaces/INotaFiscalService';
 
-export interface CreateNotaFiscalDTO {
-  cnpj: string;
-  municipio: string;
-  estado: string;
-  valor: number;
-  dataDesejadaEmissao: string;
-  descricao: string;
-}
-
-export interface EmitirNotaFiscalResponse {
-  numeroNF: string;
-  dataEmissao: string;
-}
-
-export class NotaFiscalService {
+export class NotaFiscalService implements INotaFiscalService {
   private repository: Repository<NotaFiscal>;
 
-  constructor(dataSource?: DataSource) {
+  constructor(
+    private readonly apiEmissao: IApiEmissaoNotaFiscal,
+    dataSource?: DataSource
+  ) {
     const ds = dataSource || AppDataSource;
     this.repository = ds.getRepository(NotaFiscal);
   }
 
-  async criar(dto: CreateNotaFiscalDTO): Promise<NotaFiscal> {
+  async criar(dados: DadosCriacaoNotaFiscalRequest): Promise<NotaFiscal> {
     const notaFiscal = this.repository.create({
-      ...dto,
-      dataDesejadaEmissao: new Date(dto.dataDesejadaEmissao),
+      ...dados,
+      dataDesejadaEmissao: new Date(dados.dataDesejadaEmissao),
       status: StatusNotaFiscal.PENDENTE_EMISSAO,
     });
 
@@ -58,63 +49,22 @@ export class NotaFiscalService {
       throw new Error('Apenas notas fiscais com status PENDENTE_EMISSAO podem ser emitidas');
     }
 
-    try {
-      const payload = {
-        cnpj: notaFiscal.cnpj,
-        municipio: notaFiscal.municipio,
-        estado: notaFiscal.estado,
-        valor: notaFiscal.valor,
-        dataDesejadaEmissao: notaFiscal.dataDesejadaEmissao.toISOString(),
-        descricao: notaFiscal.descricao,
-      };
+    const dadosEmissao = {
+      cnpj: notaFiscal.cnpj,
+      municipio: notaFiscal.municipio,
+      estado: notaFiscal.estado,
+      valor: notaFiscal.valor,
+      dataDesejadaEmissao: notaFiscal.dataDesejadaEmissao.toISOString(),
+      descricao: notaFiscal.descricao,
+    };
 
-      const apiUrl = process.env.API_EMISSAO_URL;
-      const apiKey = process.env.API_EMISSAO_KEY;
+    const resposta = await this.apiEmissao.emitir(dadosEmissao);
 
-      if (!apiUrl) {
-        throw new Error('URL da API não configurada. Configure a variável API_EMISSAO_URL no arquivo .env');
-      }
+    notaFiscal.numeroNF = resposta.numeroNF;
+    notaFiscal.dataEmissao = new Date(resposta.dataEmissao);
+    notaFiscal.status = StatusNotaFiscal.EMITIDA;
 
-      if (!apiKey) {
-        throw new Error('Chave de API não configurada. Configure a variável API_EMISSAO_KEY no arquivo .env');
-      }
-
-      const response = await axios.post<EmitirNotaFiscalResponse>(
-        apiUrl,
-        payload,
-        {
-          headers: {
-            Authorization: apiKey,
-            'Content-Type': 'application/json',
-          },
-        }
-      );
-
-      if (response.status === 200) {
-        notaFiscal.numeroNF = response.data.numeroNF;
-        notaFiscal.dataEmissao = new Date(response.data.dataEmissao);
-        notaFiscal.status = StatusNotaFiscal.EMITIDA;
-
-        return await this.repository.save(notaFiscal);
-      }
-
-      throw new Error('Erro ao emitir nota fiscal');
-    } catch (error: any) {
-      if (axios.isAxiosError(error)) {
-        const status = error.response?.status;
-        const message = error.response?.data?.message || error.message;
-
-        if (status === 400) {
-          throw new Error(`Erro de validação: ${message}`);
-        } else if (status === 401) {
-          throw new Error(`Erro de autenticação: ${message}`);
-        } else if (status === 500) {
-          throw new Error(`Erro interno do servidor de emissão: ${message}`);
-        }
-      }
-
-      throw new Error(`Erro ao emitir nota fiscal: ${error.message}`);
-    }
+    return await this.repository.save(notaFiscal);
   }
 }
 
